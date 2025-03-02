@@ -32,6 +32,16 @@ def get_audio(filename):
 def get_beat_samples(y, sr):
     hop_length = 512  # Initial hop length for rough detection
     
+    # Find the first non-silent part
+    # Use RMS energy to detect silence
+    frame_length = 2048
+    energy = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+    non_silent_frames = np.where(energy > 0.01 * energy.max())[0]
+    if len(non_silent_frames) > 0:
+        # Convert frames to samples and trim the signal
+        first_sound = non_silent_frames[0] * hop_length
+        y = y[first_sound:]
+    
     # Compute onset envelope with higher temporal precision
     onset_env = librosa.onset.onset_strength(
         y=y, 
@@ -49,6 +59,12 @@ def get_beat_samples(y, sr):
         tightness=100,
         trim=True
     )
+    
+    # Convert beat frames back to original signal's time base
+    if len(non_silent_frames) > 0:
+        beat_samples = librosa.frames_to_samples(beat_frames, hop_length=hop_length) + first_sound
+    else:
+        beat_samples = librosa.frames_to_samples(beat_frames, hop_length=hop_length)
     
     # Get precise onset times using multiple onset detection functions
     odf_types = ['energy', 'hfc', 'complex']
@@ -80,6 +96,9 @@ def get_beat_samples(y, sr):
         )
         
         if len(onset_samples) > 0:
+            # Adjust onset samples for trimmed signal
+            if len(non_silent_frames) > 0:
+                onset_samples = onset_samples + first_sound
             onset_backtrack_samples.append(onset_samples)
     
     # Combine all onset samples
@@ -88,15 +107,13 @@ def get_beat_samples(y, sr):
         unique_onsets = np.unique(all_onsets)
     else:
         # Fallback to basic frame conversion if no onsets found
-        return librosa.frames_to_samples(beat_frames, hop_length=hop_length)
+        return beat_samples
     
     # For each beat frame, find the most likely onset within a small window
-    beat_samples = []
+    final_beat_samples = []
     window_size = int(0.05 * sr)  # 50ms window for refinement
     
-    for beat_frame in beat_frames:
-        beat_sample = librosa.frames_to_samples(beat_frame, hop_length=hop_length)
-        
+    for beat_sample in beat_samples:
         # Find onsets within the window around the beat
         nearby_onsets = unique_onsets[
             (unique_onsets >= beat_sample - window_size) &
@@ -112,27 +129,12 @@ def get_beat_samples(y, sr):
                 energies.append(np.sum(np.abs(y[start:end])**2))
             
             # Use the onset with highest local energy
-            beat_samples.append(nearby_onsets[np.argmax(energies)])
+            final_beat_samples.append(nearby_onsets[np.argmax(energies)])
         else:
             # If no nearby onset found, use the original beat position
-            beat_samples.append(beat_sample)
+            final_beat_samples.append(beat_sample)
     
-    beat_samples = np.array(beat_samples)
-    
-    # Calculate average interval between beats
-    if len(beat_samples) > 1:
-        intervals = np.diff(beat_samples)
-        avg_interval = int(np.mean(intervals))
-        
-        # Add an additional beat at the average interval from the last beat
-        last_beat = beat_samples[-1]
-        next_beat = last_beat + avg_interval
-        
-        # Only add if it's within the signal length
-        if next_beat < len(y):
-            beat_samples = np.append(beat_samples, next_beat)
-    
-    return beat_samples
+    return np.array(final_beat_samples)
 
 def get_mfcc(y, sr):
     return librosa.feature.mfcc(y=y, sr=sr, hop_length=512, n_mfcc=20)
@@ -268,7 +270,36 @@ def decimate_beat_samples(beat_samples):
     """Return even-indexed elements from the beat samples array"""
     return beat_samples[::2]
 
-def compute_recurrence_matrix(beat_chromagrams, metric='cosine', threshold=None):
+def get_dominant_notes(beat_chromagrams, n_notes=3):
+    """
+    Get the N most prominent notes for each beat, sorted in chromatic order.
+    
+    Parameters:
+        beat_chromagrams: array of chromagrams for each beat
+        n_notes: number of top notes to identify per beat
+    
+    Returns:
+        list of strings, each containing the dominant notes for a beat
+    """
+    # Note names in order of chromagram bins
+    note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+    
+    beat_notes = []
+    for beat_chroma in beat_chromagrams:
+        # Get indices of N strongest components
+        top_indices = np.argsort(beat_chroma)[-n_notes:]
+        
+        # Sort indices by chromatic order (0-11) rather than by strength
+        top_indices.sort()
+        
+        # Get corresponding note names
+        notes = [note_names[i] for i in top_indices]
+        # Join notes
+        beat_notes.append('/'.join(notes))
+    
+    return beat_notes
+
+def compute_recurrence_matrix_for_chromogram(beat_chromagrams, metric='cosine', threshold=None):
     """
     Compute a recurrence matrix from beat chromagrams.
     
@@ -338,23 +369,47 @@ def visualize_combined_analysis(y, sr, beat_samples, beat_chromagrams, rec_matri
         beat_chromagrams: array of chromagrams for each beat
         rec_matrix: recurrence matrix
     """
+    # Get dominant notes for each beat
+    beat_notes = get_dominant_notes(beat_chromagrams, n_notes=3)
+    
     # Create figure with subplots
     fig = plt.figure(figsize=(15, 10))
     gs = plt.GridSpec(2, 2, height_ratios=[1, 2])
     
-    # Plot waveform with beat markers
+    # Plot waveform with beat markers and note labels
     ax0 = plt.subplot(gs[0, :])
-    # Convert samples to time for both waveform and beats
     times = np.arange(len(y)) / sr
     beat_times = beat_samples / sr
     
     ax0.plot(times, y, color='gray', alpha=0.5)
-    ax0.vlines(beat_times, -1, 1, color='r', alpha=0.5, label='Beats')
+    
+    # Plot beat markers and segment boundaries
+    for i in range(len(beat_times)-1):
+        # Draw vertical line at beat position
+        ax0.axvline(beat_times[i], color='r', alpha=0.5)
+        # Draw segment boundary
+        ax0.axvspan(beat_times[i], beat_times[i+1], alpha=0.1, color='blue')
+        # Add note label in middle of segment
+        segment_center = (beat_times[i] + beat_times[i+1]) / 2
+        ax0.text(segment_center, 1.1, beat_notes[i], rotation=45, ha='center', va='bottom')
+    
+    # Draw final beat marker and segment
+    if len(beat_times) > 0:
+        ax0.axvline(beat_times[-1], color='r', alpha=0.5)
+        # For the last segment, extend to the end of the signal
+        final_time = len(y) / sr
+        ax0.axvspan(beat_times[-1], final_time, alpha=0.1, color='blue')
+        # Add label for final segment
+        if len(beat_notes) == len(beat_times):
+            segment_center = (beat_times[-1] + final_time) / 2
+            ax0.text(segment_center, 1.1, beat_notes[-1], rotation=45, ha='center', va='bottom')
+    
     ax0.set_xlim(0, len(y) / sr)
-    ax0.set_ylim(-1, 1)
-    ax0.set_title('Waveform and Beats')
-    ax0.set_xlabel('Time (s)')
-    ax0.legend()
+    ax0.set_ylim(-1, 1.5)  # Increased y-limit to accommodate labels
+    ax0.set_title('Waveform and Beats with Dominant Notes')
+    ax0.set_xlabel('')  # Remove x label from top plot
+    ax0.set_ylabel('Amplitude')
+    ax0.legend(['Waveform', 'Beat', 'Segment'])
     
     # Plot chromagram
     ax1 = plt.subplot(gs[1, 0])
@@ -380,7 +435,7 @@ def visualize_combined_analysis(y, sr, beat_samples, beat_chromagrams, rec_matri
 
 def main():
     # Replace with your audio file path
-    audio_file_name = "PORTA.wav"  # or .wav
+    audio_file_name = "PIANOSOLO.mp3"  # or .wav
     try:
         y, sr = get_audio(audio_file_name)
         beat_samples = get_beat_samples(y, sr)
@@ -392,7 +447,7 @@ def main():
         beat_chromagrams = get_beat_chromagrams(y, sr, beat_samples)
         
         # Compute recurrence matrix
-        rec_matrix = compute_recurrence_matrix(beat_chromagrams, metric='cosine')
+        rec_matrix = compute_recurrence_matrix_for_chromogram(beat_chromagrams, metric='cosine')
         
         # Export beats to files
         export_beats_to_files(y, sr, beat_samples, audio_file_name)
