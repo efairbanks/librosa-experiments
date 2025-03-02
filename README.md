@@ -25,36 +25,7 @@ uv pip install -e .
 
 ## Usage
 
-1. Import the MusicAnalyzer class:
-```python
-from music_analyzer import MusicAnalyzer
-```
-
-2. Create an analyzer instance with your audio file:
-```python
-analyzer = MusicAnalyzer("path_to_your_audio.mp3")
-```
-
-3. Analyze and visualize:
-```python
-# Get complete analysis
-results = analyzer.analyze_all()
-
-# Generate visualizations
-analyzer.visualize_waveform()
-analyzer.visualize_spectrogram()
-analyzer.visualize_beats()
-```
-
-See `example.py` for a complete usage example.
-
-## Supported File Formats
-
-The analyzer supports common audio formats including:
-- WAV
-- MP3
-- OGG
-- FLAC
+`uv run simpler_example.py`
 
 ## Requirements
 
