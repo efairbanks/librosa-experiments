@@ -1,13 +1,6 @@
-# Music Analyzer
+# Experiments /w librosa
 
-A Python-based tool for analyzing musical audio files. This project provides functionality to extract and visualize various musical features including:
-
-- Tempo detection
-- Key detection
-- Beat tracking
-- Waveform visualization
-- Spectrogram analysis
-- Musical structure analysis
+Right now this does some beat-by-beat harmonic analysis of musical audio signals and also generates a recurrence/correllation matrix that shows the harmonic similarities between beats.
 
 ## Installation
 
